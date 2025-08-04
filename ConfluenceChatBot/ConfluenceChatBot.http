@@ -1,0 +1,6 @@
+@ConfluenceChatBot_HostAddress = http://localhost:5073
+
+GET {{ConfluenceChatBot_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

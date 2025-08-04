@@ -1,0 +1,25 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.13.35919.96 d17.13
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ConfluenceChatBot", "ConfluenceChatBot\ConfluenceChatBot.csproj", "{AFCCA6E4-99C9-4189-9F30-1B41B90B4B7E}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{AFCCA6E4-99C9-4189-9F30-1B41B90B4B7E}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{AFCCA6E4-99C9-4189-9F30-1B41B90B4B7E}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{AFCCA6E4-99C9-4189-9F30-1B41B90B4B7E}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{AFCCA6E4-99C9-4189-9F30-1B41B90B4B7E}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {CD5CE9BF-402A-49D9-BE49-54951D01D2DA}
+	EndGlobalSection
+EndGlobal
