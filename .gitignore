@@ -1,17 +1,31 @@
-# Build folders
+# Visual Studio temporary files, build results, and cache
+.vs/
 bin/
 obj/
-
-# User-specific files
 *.user
 *.suo
+*.cache
+*.pdb
 
-# Log files
+# Local database or index files
+*.vsidx
+
+# Rider IDE files
+.idea/
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# NuGet packages
+*.nupkg
+packages/
+
+# Node/npm (if applicable)
+node_modules/
+
+# Logs
 *.log
 
-# Visual Studio Code
-.vscode/
-
-# Temporary files
-*.tmp
-*.temp
+# Config files with secrets
+ConfluenceChatBot/appsettings.json
