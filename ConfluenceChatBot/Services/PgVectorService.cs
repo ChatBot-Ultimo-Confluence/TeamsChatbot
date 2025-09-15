@@ -1,13 +1,14 @@
 ﻿using HtmlAgilityPack;
-using Microsoft.Extensions.Configuration;
 using Npgsql;
-using Npgsql.Internal.Postgres;
 using Pgvector;
 using System.Net;
 using System.Text.RegularExpressions;
 
 namespace ConfluenceChatBot.Services
 {
+    /// <summary>
+    /// Provides operations for storing, searching, and managing embeddings in PostgreSQL with pgvector.
+    /// </summary>
     public class PgVectorService
     {
         private readonly string _connectionString;
@@ -16,66 +17,298 @@ namespace ConfluenceChatBot.Services
         public PgVectorService(IConfiguration configuration, EmbeddingService embeddingService)
         {
             var pgConfig = configuration.GetSection("PostgreSQL");
-            _connectionString = $"Host={pgConfig["Host"]};Port={pgConfig["Port"]};Database={pgConfig["Database"]};Username={pgConfig["Username"]};Password={pgConfig["Password"]}";
+            _connectionString =
+                $"Host={pgConfig["Host"]};Port={pgConfig["Port"]};Database={pgConfig["Database"]};" +
+                $"Username={pgConfig["Username"]};Password={pgConfig["Password"]}";
+
             _embeddingService = embeddingService;
+
+            EnsureVectorIndex();
         }
 
-        public async Task InsertEmbeddingAsync(string pageId, string title, string content)
+        // --------------------------------------------------------------------
+        // Database Setup
+        // --------------------------------------------------------------------
+
+        /// <summary>
+        /// Ensures that the vector index exists on the embeddings table.
+        /// </summary>
+        private void EnsureVectorIndex()
         {
-            var chunks = SplitByHeaderSections(content);
+            using var conn = new NpgsqlConnection(_connectionString);
+            conn.Open();
+
+            using var cmd = new NpgsqlCommand(@"
+                CREATE INDEX IF NOT EXISTS idx_confluence_embeddings_vector
+                ON confluence_embeddings
+                USING ivfflat (embedding vector_l2_ops) WITH (lists = 100);
+            ", conn);
+
+            cmd.ExecuteNonQuery();
+        }
+
+        // --------------------------------------------------------------------
+        // Insert / Upsert
+        // --------------------------------------------------------------------
+
+        /// <summary>
+        /// Inserts embeddings for a Confluence page, splitting content into sections.
+        /// Existing rows are upserted if conflicts occur.
+        /// </summary>
+        public async Task InsertEmbeddingOptimizedAsync(
+            string pageId,
+            string title,
+            string htmlContent,
+            int version,
+            int batchSize = 5)
+        {
+            // Clean content and preserve code snippets
+            var plainText = CleanContentWithCode(htmlContent);
+
+            // Split into sections by headers or steps
+            var sections = SplitSections(plainText);
 
             await using var conn = new NpgsqlConnection(_connectionString);
             await conn.OpenAsync();
 
-            foreach (var chunk in chunks)
+            // Group sections into batches for embedding
+            var batches = sections
+                .Select((s, i) => new { s, i })
+                .GroupBy(x => x.i / batchSize)
+                .Select(g => g.Select(x => x.s).ToList())
+                .ToList();
+
+            foreach (var batch in batches)
             {
-                try
+                // Generate embeddings in parallel
+                var tasks = batch.Select(async section =>
                 {
-                    var updatedContent = InsertInlineCodeSnippets(chunk.content);
-                    var embeddings = await _embeddingService.GenerateEmbeddingAsync(updatedContent);
+                    try
+                    {
+                        var embedding = await _embeddingService.GenerateEmbeddingAsync(section.content);
+                        if (embedding == null || embedding.Length == 0) return null;
+                        return new { section.header, section.content, embedding };
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.Error.WriteLine($"Embedding generation failed: {ex.Message}");
+                        return null;
+                    }
+                }).ToList();
 
-                    if (embeddings == null || embeddings.Length != 768)
-                        throw new Exception("Embedding size mismatch.");
+                var results = await Task.WhenAll(tasks);
 
+                // Upsert each section
+                foreach (var r in results.Where(r => r != null))
+                {
                     await using var cmd = new NpgsqlCommand(@"
-                        INSERT INTO confluence_embeddings (page_id, title, content, section, embedding)
-                        VALUES (@pageId, @title, @content, @section, @embedding::vector)", conn);
+                        INSERT INTO confluence_embeddings (page_id, title, section, content, embedding, version)
+                        VALUES (@pageId, @title, @section, @content, @embedding::vector, @version)
+                        ON CONFLICT (page_id, section, version) DO UPDATE
+                        SET content = EXCLUDED.content,
+                            embedding = EXCLUDED.embedding,
+                            title = EXCLUDED.title", conn);
 
                     cmd.Parameters.AddWithValue("pageId", pageId);
                     cmd.Parameters.AddWithValue("title", title);
-                    cmd.Parameters.AddWithValue("content", updatedContent);
-                    cmd.Parameters.AddWithValue("section", chunk.header);
-                    cmd.Parameters.AddWithValue("embedding", embeddings);
+                    cmd.Parameters.AddWithValue("section", r.header);
+                    cmd.Parameters.AddWithValue("content", r.content);
+                    cmd.Parameters.AddWithValue("embedding", new Vector(r.embedding));
+                    cmd.Parameters.AddWithValue("version", version);
 
                     await cmd.ExecuteNonQueryAsync();
                 }
-                catch (Exception ex)
-                {
-                    Console.Error.WriteLine($"Error inserting section embedding: {ex.Message}");
-                }
             }
         }
 
-        private string InsertInlineCodeSnippets(string htmlContent)
+        // --------------------------------------------------------------------
+        // Search
+        // --------------------------------------------------------------------
+
+        /// <summary>
+        /// Searches for similar content sections using vector similarity.
+        /// </summary>
+        public async Task<IEnumerable<(string section, string content)>> SearchSimilarAsync(
+            string userQuery,
+            int topK)
         {
-            var codeSnippets = ExtractConfluenceCodeSnippets(htmlContent);
-            var updatedContent = htmlContent;
-
-            foreach (var snippet in codeSnippets)
+            try
             {
-                var start = snippet.Substring(0, Math.Min(snippet.Length, 30));
-                var index = updatedContent.IndexOf(start);
+                var queryEmbedding = await _embeddingService.GenerateEmbeddingAsync(userQuery);
+                if (queryEmbedding == null || queryEmbedding.Length == 0)
+                    throw new Exception("Embedding generation failed or empty.");
 
-                if (index >= 0)
+                await using var conn = new NpgsqlConnection(_connectionString);
+                await conn.OpenAsync();
+
+                var query = $@"
+                    SELECT section, content, embedding <=> @e AS similarity
+                    FROM confluence_embeddings
+                    ORDER BY similarity ASC
+                    LIMIT {topK};";
+
+                await using var cmd = new NpgsqlCommand(query, conn);
+                cmd.Parameters.AddWithValue("e", new Vector(queryEmbedding));
+                cmd.Parameters["e"].DataTypeName = "vector";
+
+                var results = new List<(string section, string content)>();
+
+                await using var reader = await cmd.ExecuteReaderAsync();
+                while (await reader.ReadAsync())
                 {
-                    updatedContent = updatedContent.Remove(index, start.Length)
-                                                   .Insert(index, snippet);
-                }
-            }
+                    var section = reader.GetString(0);
+                    var content = Regex.Replace(reader.GetString(1), @"\s{2,}", " ").Trim();
 
-            return updatedContent;
+                    results.Add((section, content));
+                }
+
+                return results;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Error searching embeddings: {ex.Message}");
+                return Enumerable.Empty<(string, string)>();
+            }
         }
 
+        // --------------------------------------------------------------------
+        // Version Management
+        // --------------------------------------------------------------------
+
+        /// <summary>
+        /// Gets the latest stored version for a page.
+        /// </summary>
+        public async Task<int?> GetPageVersionAsync(string pageId)
+        {
+            await using var conn = new NpgsqlConnection(_connectionString);
+            await conn.OpenAsync();
+
+            var cmd = new NpgsqlCommand(
+                "SELECT MAX(version) FROM confluence_embeddings WHERE page_id = @pageId",
+                conn);
+
+            cmd.Parameters.AddWithValue("pageId", pageId);
+
+            var result = await cmd.ExecuteScalarAsync();
+            if (result == DBNull.Value) return null;
+            return Convert.ToInt32(result);
+        }
+
+        /// <summary>
+        /// Deletes all older versions of a page, keeping only the current version.
+        /// </summary>
+        public async Task DeleteOldVersionsAsync(string pageId, int currentVersion)
+        {
+            await using var conn = new NpgsqlConnection(_connectionString);
+            await conn.OpenAsync();
+
+            var sql = @"
+                DELETE FROM confluence_embeddings
+                WHERE page_id = @pageId
+                AND version < @currentVersion";
+
+            await using var cmd = new NpgsqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("pageId", pageId);
+            cmd.Parameters.AddWithValue("currentVersion", currentVersion);
+
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        /// <summary>
+        /// Deletes embeddings for pages no longer present in Confluence.
+        /// </summary>
+        public async Task DeletePagesByIdsAsync(HashSet<string> pageIds)
+        {
+            if (!pageIds.Any()) return;
+
+            await using var conn = new NpgsqlConnection(_connectionString);
+            await conn.OpenAsync();
+
+            var ids = string.Join(",", pageIds.Select(id => $"'{id}'"));
+            var sql = $"DELETE FROM confluence_embeddings WHERE page_id IN ({ids})";
+
+            await using var cmd = new NpgsqlCommand(sql, conn);
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        /// <summary>
+        /// Gets all page IDs and their latest versions.
+        /// </summary>
+        public async Task<List<(string Id, int Version)>> GetAllPageIdsAndVersionsAsync()
+        {
+            var pages = new List<(string, int)>();
+
+            await using var conn = new NpgsqlConnection(_connectionString);
+            await conn.OpenAsync();
+
+            var sql = "SELECT page_id, MAX(version) AS version FROM confluence_embeddings GROUP BY page_id";
+
+            await using var cmd = new NpgsqlCommand(sql, conn);
+            await using var reader = await cmd.ExecuteReaderAsync();
+
+            while (await reader.ReadAsync())
+            {
+                pages.Add((reader.GetString(0), reader.GetInt32(1)));
+            }
+
+            return pages;
+        }
+
+        // --------------------------------------------------------------------
+        // Helpers: Content Processing
+        // --------------------------------------------------------------------
+
+        /// <summary>
+        /// Cleans HTML content while preserving Confluence code snippets.
+        /// </summary>
+        private string CleanContentWithCode(string htmlContent)
+        {
+            if (string.IsNullOrWhiteSpace(htmlContent)) return "";
+
+            htmlContent = RemoveCData(htmlContent);
+
+            // Extract and temporarily replace code snippets
+            var codeSnippets = ExtractConfluenceCodeSnippets(htmlContent);
+            for (int i = 0; i < codeSnippets.Count; i++)
+                htmlContent = htmlContent.Replace(codeSnippets[i], $"__CODE_BLOCK_{i}__");
+
+            // Remove HTML tags and decode
+            htmlContent = WebUtility.HtmlDecode(htmlContent);
+            htmlContent = Regex.Replace(htmlContent, "<.*?>", " ");
+
+            // Remove emojis/special symbols
+            htmlContent = Regex.Replace(htmlContent,
+                @"[\u2700-\u27BF]|[\uE000-\uF8FF]|[\uD83C-\uDBFF\uDC00-\uDFFF]",
+                " ");
+
+            // Normalize whitespace
+            htmlContent = Regex.Replace(htmlContent, @"\s{2,}", " ").Trim();
+
+            // Restore code snippets as Markdown
+            for (int i = 0; i < codeSnippets.Count; i++)
+                htmlContent = htmlContent.Replace($"__CODE_BLOCK_{i}__", $"\n```\n{codeSnippets[i]}\n```\n");
+
+            return htmlContent;
+        }
+
+        /// <summary>
+        /// Splits content into sections based on headings or step numbers.
+        /// </summary>
+        private List<(string header, string content)> SplitSections(string content)
+        {
+            return Regex.Split(content, @"(?<=\d\.\s)|(?<=##\s)|(?<=###\s)")
+                        .Where(s => !string.IsNullOrWhiteSpace(s))
+                        .Select(s =>
+                        {
+                            string header = s.Length > 50 ? s.Substring(0, 50) : s;
+                            return (header, s.Trim());
+                        })
+                        .ToList();
+        }
+
+        /// <summary>
+        /// Extracts code snippets from Confluence HTML (ac:structured-macro).
+        /// </summary>
         public List<string> ExtractConfluenceCodeSnippets(string confluenceHtml)
         {
             var snippets = new List<string>();
@@ -83,7 +316,8 @@ namespace ConfluenceChatBot.Services
             htmlDoc.LoadHtml(confluenceHtml);
 
             var macroNodes = htmlDoc.DocumentNode.Descendants()
-                .Where(n => n.Name == "ac:structured-macro" && n.Attributes["ac:name"]?.Value == "code")
+                .Where(n => n.Name == "ac:structured-macro" &&
+                            n.Attributes["ac:name"]?.Value == "code")
                 .ToList();
 
             foreach (var macro in macroNodes)
@@ -102,79 +336,19 @@ namespace ConfluenceChatBot.Services
             return snippets;
         }
 
-        private List<(string header, string content)> SplitByHeaderSections(string htmlContent)
+        /// <summary>
+        /// Removes CDATA blocks from text.
+        /// </summary>
+        private string RemoveCData(string text)
         {
-            var results = new List<(string header, string content)>();
-            var matches = Regex.Split(htmlContent, "(<h[23]>.*?</h[23]>)", RegexOptions.IgnoreCase);
+            if (string.IsNullOrWhiteSpace(text)) return text;
 
-            string currentHeader = "Introduction";
-            string currentContent = "";
-
-            foreach (var part in matches)
-            {
-                if (Regex.IsMatch(part, "<h[23]>", RegexOptions.IgnoreCase))
-                {
-                    if (!string.IsNullOrWhiteSpace(currentContent))
-                    {
-                        results.Add((currentHeader, currentContent.Trim()));
-                        currentContent = string.Empty;
-                    }
-                    currentHeader = StripHtml(part);
-                }
-                else
-                {
-                    currentContent += part;
-                }
-            }
-
-            if (!string.IsNullOrWhiteSpace(currentContent))
-                results.Add((currentHeader, currentContent.Trim()));
-
-            return results;
-        }
-
-        private string StripHtml(string input)
-        {
-            return Regex.Replace(input, "<.*?>", string.Empty);
-        }
-
-        public async Task<IEnumerable<(string section, string content)>> SearchSimilarAsync(string userQuery, int topK)
-        {
-            try
-            {
-                var queryEmbedding = await _embeddingService.GenerateEmbeddingAsync(userQuery);
-
-                if (queryEmbedding == null || queryEmbedding.Length != 768)
-                    throw new Exception("Embedding generation failed or incorrect dimensions.");
-
-                await using var conn = new NpgsqlConnection(_connectionString);
-                await conn.OpenAsync();
-
-                var query = $@"
-            SELECT section, content, embedding <=> @e AS similarity
-            FROM confluence_embeddings
-            ORDER BY similarity ASC
-            LIMIT {topK};";
-
-                await using var cmd = new NpgsqlCommand(query, conn);
-                cmd.Parameters.AddWithValue("e", new Vector(queryEmbedding));
-                cmd.Parameters["e"].DataTypeName = "vector";
-
-                var results = new List<(string section, string content)>();
-                await using var reader = await cmd.ExecuteReaderAsync();
-
-                while (await reader.ReadAsync())
-                {
-                    results.Add((reader.GetString(0), reader.GetString(1)));
-                }
-
-                return results;
-            }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine($"Error searching embeddings: {ex.Message}");
-                throw;
-            }
+            text = text.Trim();
+            return Regex.Replace(
+                text,
+                @"<!\[CDATA\[(.*?)\]\]>",
+                m => m.Groups[1].Value.Trim(),
+                RegexOptions.Singleline | RegexOptions.IgnoreCase);
         }
     }
 }

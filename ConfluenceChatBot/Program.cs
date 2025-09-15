@@ -1,4 +1,6 @@
-﻿using ConfluenceChatBot.Extensions;
+﻿using ConfluenceChatBot.BackgroundServices;
+using ConfluenceChatBot.Extensions;
+using ConfluenceChatBot.Services;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -18,6 +20,7 @@ builder.Services
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
+builder.Services.AddHostedService<ConfluenceSyncService>();
 
 // Middleware
 var app = builder.Build();

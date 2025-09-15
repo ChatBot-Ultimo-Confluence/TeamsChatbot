@@ -5,8 +5,18 @@ using Microsoft.SemanticKernel;
 
 namespace ConfluenceChatBot.Extensions
 {
+    /// <summary>
+    /// Extension methods to register application services, Semantic Kernel, and HttpClients.
+    /// </summary>
     public static class ServiceCollectionExtensions
     {
+        // --------------------------------------------------------------------
+        // Application Services
+        // --------------------------------------------------------------------
+
+        /// <summary>
+        /// Registers application-specific services into the DI container.
+        /// </summary>
         public static IServiceCollection AddAppServices(this IServiceCollection services)
         {
             try
@@ -24,6 +34,13 @@ namespace ConfluenceChatBot.Extensions
             }
         }
 
+        // --------------------------------------------------------------------
+        // Semantic Kernel Integration
+        // --------------------------------------------------------------------
+
+        /// <summary>
+        /// Registers Semantic Kernel and Ollama chat completion services.
+        /// </summary>
         public static IServiceCollection AddSemanticKernel(this IServiceCollection services, IConfiguration config)
         {
             try
@@ -57,11 +74,21 @@ namespace ConfluenceChatBot.Extensions
             }
         }
 
+        // --------------------------------------------------------------------
+        // HttpClient Registrations
+        // --------------------------------------------------------------------
+
+        /// <summary>
+        /// Registers HttpClient instances required by the application.
+        /// </summary>
         public static IServiceCollection AddHttpClients(this IServiceCollection services)
         {
             try
             {
+                // Default HttpClient
                 services.AddHttpClient();
+
+                // Named HttpClient for Ollama API
                 services.AddHttpClient("ollama", client =>
                 {
                     client.BaseAddress = new Uri("http://localhost:11434");
