@@ -1,5 +1,6 @@
 ﻿using ConfluenceChatBot.BackgroundServices;
 using ConfluenceChatBot.Extensions;
+using ConfluenceChatBot.Models;
 using ConfluenceChatBot.Services;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
@@ -14,8 +15,8 @@ NpgsqlConnection.GlobalTypeMapper.UseVector();
 // Register services using extensions
 builder.Services
     .AddHttpClients()
-    .AddAppServices()
-    .AddSemanticKernel(builder.Configuration);
+    .Bind(s => s.AddAppServices())
+    .Bind(s => s.AddSemanticKernel(builder.Configuration));
 
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
@@ -24,9 +25,6 @@ builder.Services.AddHostedService<ConfluenceSyncService>();
 
 // Middleware
 var app = builder.Build();
-
-// Add your global exception middleware BEFORE routing
-app.UseMiddleware<GlobalExceptionMiddleware>();
 
 if (app.Environment.IsDevelopment())
 {

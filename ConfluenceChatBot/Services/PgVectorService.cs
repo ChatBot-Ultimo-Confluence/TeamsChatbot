@@ -30,17 +30,26 @@ namespace ConfluenceChatBot.Services
         // --------------------------------------------------------------------
         // Setup
         // --------------------------------------------------------------------
-        private void EnsureVectorIndex()
+        private Result<bool> EnsureVectorIndex()
         {
-            using var conn = new NpgsqlConnection(_connectionString);
-            conn.Open();
+            try
+            {
+                using var conn = new NpgsqlConnection(_connectionString);
+                conn.Open();
 
-            using var cmd = new NpgsqlCommand(@"
-                CREATE INDEX IF NOT EXISTS idx_confluence_embeddings_vector
-                ON confluence_embeddings
-                USING ivfflat (embedding vector_l2_ops) WITH (lists = 100);", conn);
+                using var cmd = new NpgsqlCommand(@"
+            CREATE INDEX IF NOT EXISTS idx_confluence_embeddings_vector
+            ON confluence_embeddings
+            USING ivfflat (embedding vector_l2_ops) WITH (lists = 100);", conn);
 
-            cmd.ExecuteNonQuery();
+                cmd.ExecuteNonQuery();
+
+                return Result<bool>.Ok(true);
+            }
+            catch (Exception ex)
+            {
+                return Result<bool>.Fail($"EnsureVectorIndex failed: {ex.Message}");
+            }
         }
 
         // --------------------------------------------------------------------
